@@ -1,6 +1,9 @@
 ---
+name: Notebook Task / Feature
+about: Plan a new notebook implementation or an addition to an existing one.
 title: ''
 labels: task, notebook
+assignees: ''
 
 ---
 
