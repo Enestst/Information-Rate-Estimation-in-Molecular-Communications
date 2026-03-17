@@ -28,30 +28,34 @@ def calculate_hitting_probabilities(mem_len, radius, distance, diffusionCoef, Ts
         P[i] = Fhit_function(radius, distance, diffusionCoef, t_end) - Fhit_function(radius, distance, diffusionCoef, t_start)
     return P
 
-def calculate_ber_vectorized(mem_len, threshold, P, variances):
+def calculate_ber_vectorized(mem_len, threshold, P_scaled, variances):
     """
     Vectorized BER calculation using Gaussian approximation.
-    Calculates error probability across all 2^mem_len bit sequences.
     """
-    P_arr = np.asarray(P, dtype=float)[:mem_len]
+    P_arr = np.asarray(P_scaled, dtype=float)[:mem_len]
     vars_arr = np.asarray(variances, dtype=float)[:mem_len]
     
+    # Generate all sequences: shape (2^mem_len, mem_len)
     seqs = np.array(list(iproduct([0, 1], repeat=mem_len)), dtype=np.float64)[:, ::-1]
     c_bit = seqs[:, 0] 
 
+    # Calculate Mean and Variance for every sequence simultaneously
     mu = (seqs * P_arr).sum(axis=1)
     var_total = (seqs * vars_arr).sum(axis=1)
     std = np.sqrt(np.maximum(var_total, 0.0))
 
     pe = np.empty_like(mu)
     
+    # Deterministic edge case (zero variance)
     zero_std = (std == 0)
     if np.any(zero_std):
         pe[zero_std & (c_bit == 1)] = np.where(mu[zero_std & (c_bit == 1)] < threshold, 1.0, 0.0)
         pe[zero_std & (c_bit == 0)] = np.where(mu[zero_std & (c_bit == 0)] >= threshold, 1.0, 0.0)
 
+    # Gaussian approximation case
     nz = ~zero_std
     if np.any(nz):
+        # Using 0.5 * erfc(x / sqrt(2)) which is equivalent to the Q-function
         pe[nz & (c_bit == 1)] = 0.5 * erfc((mu[nz & (c_bit == 1)] - threshold) / (std[nz & (c_bit == 1)] * np.sqrt(2)))
         pe[nz & (c_bit == 0)] = 0.5 * erfc((threshold - mu[nz & (c_bit == 0)]) / (std[nz & (c_bit == 0)] * np.sqrt(2)))
 
@@ -81,6 +85,7 @@ def generate_physics_sample(rng):
     P_main = P_ext[:k]
     P_extra = float(P_ext[k]) 
     
+    # Physics-based mean and variance
     P_scaled = P_main * N
     variances = N * P_main * (1.0 - P_main) 
     
@@ -97,8 +102,11 @@ def generate_physics_sample(rng):
     }
 
 def generate_random_sample(rng):
-    """Generates synthetic data using random monotone-decreasing sequences."""
+    """
+    Generates synthetic data using random monotone-decreasing sequences.
+    """
     mem_len = int(rng.integers(3, 11)) 
+    N = int(10 ** rng.uniform(3.0, 6.0)) # Randomize N for the synthetic sample
     
     P = np.empty(mem_len)
     P[0] = rng.uniform(0.05, 0.95)
@@ -106,13 +114,14 @@ def generate_random_sample(rng):
         P[i] = P[i-1] * rng.uniform(0.35, 0.98)
     P = np.clip(P, 1e-6, 1 - 1e-6) 
     
-    scales = rng.uniform(0.05, 1.00, size=mem_len)
-    variances = np.maximum(scales * P, 1e-9) 
+    P_scaled = P * N
+    variances = N * P * (1.0 - P) 
     
-    threshold = float(rng.uniform(1e-3, max(2e-3, 2.0 * P[0])))
+    # Random threshold based on the first slot's expected arrivals
+    threshold = float(rng.uniform(1.0, max(2.0, 1.5 * P_scaled[0])))
     
-    ber = calculate_ber_vectorized(mem_len, threshold, P, variances)
-    return {"mem_len": mem_len, "threshold": threshold, "BER": ber, "p0": P[0]}
+    ber = calculate_ber_vectorized(mem_len, threshold, P_scaled, variances)
+    return {"mem_len": mem_len, "threshold": threshold, "BER": ber, "p0": P[0], "N": N}
 
 # --- Main Runtime ---
 
