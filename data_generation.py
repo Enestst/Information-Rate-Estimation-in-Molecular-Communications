@@ -10,9 +10,10 @@ LOG_INTERVAL = 10000  # Log progress every 10,000 rows
 BASE_DIR = "/mnt/erencem-ozbey/ber_estimation"
 PHYSICS_CSV = os.path.join(BASE_DIR, "data_physics_total.csv")
 RANDOM_CSV = os.path.join(BASE_DIR, "data_random_total.csv")
-PHYSICS_MAX_MEM_LEN = 14
-RANDOM_MAX_MEM_LEN = 14
+PHYSICS_MAX_MEM_LEN = 15
+RANDOM_MAX_MEM_LEN = 15
 ARRIVAL_COVERAGE = 0.70
+NUM_THRESHOLDS = 25  # Number of threshold values to test per scenario
 
 # --- Core Functions ---
 
@@ -116,26 +117,31 @@ def generate_physics_sample(rng):
     P_scaled = P_main * N
     variances = N * P_main * (1.0 - P_main)
 
-    lambda_max = max(1.0, 1.5 * P_scaled[0])
-    threshold = float(rng.uniform(1.0, lambda_max))
+    sum_means = np.sum(P_scaled)
+    threshold_max = 2.0 * sum_means
+    thresholds = np.linspace(0, threshold_max, NUM_THRESHOLDS)
 
-    ber = calculate_ber_vectorized(k, threshold, P_scaled, variances)
+    rows = []
+    for threshold in thresholds:
+        ber = calculate_ber_vectorized(k, threshold, P_scaled, variances)
 
-    row = {
-        "radius": radius,
-        "distance": distance,
-        "diffusion": diff,
-        "Ts": Ts,
-        "N": N,
-        "mem_len": k,
-        "threshold": threshold,
-        "BER": ber,
-        "P_mem_len_extra": P_extra,
-        "P_mem_len_extra_var": P_extra * (1.0 - P_extra),
-    }
+        row = {
+            "radius": radius,
+            "distance": distance,
+            "diffusion": diff,
+            "Ts": Ts,
+            "N": N,
+            "mem_len": k,
+            "threshold": float(threshold),
+            "BER": ber,
+            "P_mem_len_extra": P_extra,
+            "P_mem_len_extra_var": P_extra * (1.0 - P_extra),
+        }
 
-    row = add_tap_columns(row, P_main, PHYSICS_MAX_MEM_LEN, prefix="tap")
-    return row
+        row = add_tap_columns(row, P_main, PHYSICS_MAX_MEM_LEN, prefix="tap")
+        rows.append(row)
+
+    return rows
 
 
 def generate_random_sample(rng):
@@ -149,26 +155,37 @@ def generate_random_sample(rng):
     P[0] = rng.uniform(0.05, 0.95)
     for i in range(1, mem_len):
         P[i] = P[i - 1] * rng.uniform(0.35, 0.98)
+
+    total = np.sum(P)
+    max_total = rng.uniform(0.6, 0.95)
+    if total > max_total:
+        P = P * (max_total / total)
+
     P = np.clip(P, 1e-6, 1 - 1e-6)
 
     P_scaled = P * N
     variances = N * P * (1.0 - P)
 
-    # Random threshold based on the first slot's expected arrivals
-    threshold = float(rng.uniform(1.0, max(2.0, 1.5 * P_scaled[0])))
+    sum_means = np.sum(P_scaled)
+    threshold_max = 2.0 * sum_means
+    thresholds = np.linspace(0, threshold_max, NUM_THRESHOLDS)
 
-    ber = calculate_ber_vectorized(mem_len, threshold, P_scaled, variances)
+    rows = []
+    for threshold in thresholds:
+        ber = calculate_ber_vectorized(mem_len, threshold, P_scaled, variances)
 
-    row = {
-        "mem_len": mem_len,
-        "threshold": threshold,
-        "BER": ber,
-        "p0": P[0],
-        "N": N,
-    }
+        row = {
+            "mem_len": mem_len,
+            "threshold": float(threshold),
+            "BER": ber,
+            "p0": P[0],
+            "N": N,
+        }
 
-    row = add_tap_columns(row, P, RANDOM_MAX_MEM_LEN, prefix="tap")
-    return row
+        row = add_tap_columns(row, P, RANDOM_MAX_MEM_LEN, prefix="tap")
+        rows.append(row)
+
+    return rows
 
 
 # --- Main Runtime ---
@@ -192,9 +209,9 @@ if __name__ == "__main__":
 
     try:
         while True:
-            p_buffer.append(generate_physics_sample(rng))
-            r_buffer.append(generate_random_sample(rng))
-            total_generated += 1
+            p_buffer.extend(generate_physics_sample(rng))
+            r_buffer.extend(generate_random_sample(rng))
+            total_generated += NUM_THRESHOLDS
 
             # To prevent data loss, we append to the file frequently
             # We use a small buffer (e.g., 100 rows) to balance safety and speed
