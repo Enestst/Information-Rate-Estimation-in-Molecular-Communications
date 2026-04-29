@@ -113,33 +113,37 @@ def generate_physics_sample(rng):
     P_main = P_ext[:k]
     P_extra = float(P_ext[k])
 
-    # Physics-based mean and variance
-    P_scaled = P_main * N
-    variances = N * P_main * (1.0 - P_main)
-
-    sum_means = np.sum(P_scaled)
-    threshold_max = 2.0 * sum_means
-    thresholds = np.linspace(0, threshold_max, NUM_THRESHOLDS)
-
+    # Generate data for both N and N*2
     rows = []
-    for threshold in thresholds:
-        ber = calculate_ber_vectorized(k, threshold, P_scaled, variances)
+    for N_multiplier in [1, 2]:
+        N_current = N * N_multiplier
 
-        row = {
-            "radius": radius,
-            "distance": distance,
-            "diffusion": diff,
-            "Ts": Ts,
-            "N": N,
-            "mem_len": k,
-            "threshold": float(threshold),
-            "BER": ber,
-            "P_mem_len_extra": P_extra,
-            "P_mem_len_extra_var": P_extra * (1.0 - P_extra),
-        }
+        # Physics-based mean and variance
+        P_scaled = P_main * N_current
+        variances = N_current * P_main * (1.0 - P_main)
 
-        row = add_tap_columns(row, P_main, PHYSICS_MAX_MEM_LEN, prefix="tap")
-        rows.append(row)
+        sum_means = np.sum(P_scaled)
+        threshold_max = 2.0 * sum_means
+        thresholds = np.linspace(0, threshold_max, NUM_THRESHOLDS)
+
+        for threshold in thresholds:
+            ber = calculate_ber_vectorized(k, threshold, P_scaled, variances)
+
+            row = {
+                "radius": radius,
+                "distance": distance,
+                "diffusion": diff,
+                "Ts": Ts,
+                "N": N_current,
+                "mem_len": k,
+                "threshold": float(threshold),
+                "BER": ber,
+                "P_mem_len_extra": P_extra,
+                "P_mem_len_extra_var": P_extra * (1.0 - P_extra),
+            }
+
+            row = add_tap_columns(row, P_main, PHYSICS_MAX_MEM_LEN, prefix="tap")
+            rows.append(row)
 
     return rows
 
@@ -163,27 +167,31 @@ def generate_random_sample(rng):
 
     P = np.clip(P, 1e-6, 1 - 1e-6)
 
-    P_scaled = P * N
-    variances = N * P * (1.0 - P)
-
-    sum_means = np.sum(P_scaled)
-    threshold_max = 2.0 * sum_means
-    thresholds = np.linspace(0, threshold_max, NUM_THRESHOLDS)
-
+    # Generate data for both N and N*2
     rows = []
-    for threshold in thresholds:
-        ber = calculate_ber_vectorized(mem_len, threshold, P_scaled, variances)
+    for N_multiplier in [1, 2]:
+        N_current = N * N_multiplier
 
-        row = {
-            "mem_len": mem_len,
-            "threshold": float(threshold),
-            "BER": ber,
-            "p0": P[0],
-            "N": N,
-        }
+        P_scaled = P * N_current
+        variances = N_current * P * (1.0 - P)
 
-        row = add_tap_columns(row, P, RANDOM_MAX_MEM_LEN, prefix="tap")
-        rows.append(row)
+        sum_means = np.sum(P_scaled)
+        threshold_max = 2.0 * sum_means
+        thresholds = np.linspace(0, threshold_max, NUM_THRESHOLDS)
+
+        for threshold in thresholds:
+            ber = calculate_ber_vectorized(mem_len, threshold, P_scaled, variances)
+
+            row = {
+                "mem_len": mem_len,
+                "threshold": float(threshold),
+                "BER": ber,
+                "p0": P[0],
+                "N": N_current,
+            }
+
+            row = add_tap_columns(row, P, RANDOM_MAX_MEM_LEN, prefix="tap")
+            rows.append(row)
 
     return rows
 
@@ -211,7 +219,7 @@ if __name__ == "__main__":
         while True:
             p_buffer.extend(generate_physics_sample(rng))
             r_buffer.extend(generate_random_sample(rng))
-            total_generated += NUM_THRESHOLDS
+            total_generated += NUM_THRESHOLDS * 2  # Now generating for both N and N*2
 
             # To prevent data loss, we append to the file frequently
             # We use a small buffer (e.g., 100 rows) to balance safety and speed
