@@ -160,10 +160,9 @@ def generate_random_sample(rng):
     for i in range(1, mem_len):
         P[i] = P[i - 1] * rng.uniform(0.35, 0.98)
 
-    total = np.sum(P)
-    max_total = rng.uniform(0.6, 0.95)
-    if total > max_total:
-        P = P * (max_total / total)
+    # Always normalize to a random total between 0.1 and 1
+    target_total = rng.uniform(0.1, 1.0)
+    P = P / np.sum(P) * target_total
 
     P = np.clip(P, 1e-6, 1 - 1e-6)
 
