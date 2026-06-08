@@ -1,0 +1,246 @@
+import numpy as np
+import pandas as pd
+import time
+import os
+from scipy.special import erfc
+from itertools import product as iproduct
+
+# --- Configuration ---
+LOG_INTERVAL = 10000  # Log progress every 10,000 rows
+BASE_DIR = "/mnt/erencem-ozbey/ber_estimation"
+
+# Updated filenames for this version
+PHYSICS_CSV = os.path.join(BASE_DIR, "data_physics_with_variances_total_v2.csv")
+RANDOM_CSV = os.path.join(BASE_DIR, "data_random_with_random_variances_total_v2.csv")
+
+PHYSICS_MAX_MEM_LEN = 14
+RANDOM_MAX_MEM_LEN = 14
+ARRIVAL_COVERAGE = 0.70
+
+# --- Core Functions ---
+
+def Fhit_function(radius, distance, diffusionCoef, t):
+    """Calculates cumulative hitting probability up to time t."""
+    if t <= 0:
+        return 0.0
+    return (radius / (distance + radius)) * erfc(distance / np.sqrt(4 * diffusionCoef * t))
+
+
+def calculate_hitting_probabilities(mem_len, radius, distance, diffusionCoef, Ts):
+    """Calculates interval hitting probabilities P[i] for each symbol slot."""
+    P = np.zeros(mem_len)
+    for i in range(mem_len):
+        t_end = (i + 1) * Ts
+        t_start = i * Ts
+        P[i] = Fhit_function(radius, distance, diffusionCoef, t_end) - Fhit_function(
+            radius, distance, diffusionCoef, t_start
+        )
+    return P
+
+
+def calculate_ber_vectorized(mem_len, threshold, P_scaled, variances):
+    """
+    Vectorized BER calculation using Gaussian approximation.
+    """
+    P_arr = np.asarray(P_scaled, dtype=float)[:mem_len]
+    vars_arr = np.asarray(variances, dtype=float)[:mem_len]
+
+    # Generate all sequences: shape (2^mem_len, mem_len)
+    seqs = np.array(list(iproduct([0, 1], repeat=mem_len)), dtype=np.float64)[:, ::-1]
+    c_bit = seqs[:, 0]
+
+    # Calculate Mean and Variance for every sequence simultaneously
+    mu = (seqs * P_arr).sum(axis=1)
+    var_total = (seqs * vars_arr).sum(axis=1)
+    std = np.sqrt(np.maximum(var_total, 0.0))
+
+    pe = np.empty_like(mu)
+
+    # Deterministic edge case (zero variance)
+    zero_std = (std == 0)
+    if np.any(zero_std):
+        pe[zero_std & (c_bit == 1)] = np.where(
+            mu[zero_std & (c_bit == 1)] < threshold, 1.0, 0.0
+        )
+        pe[zero_std & (c_bit == 0)] = np.where(
+            mu[zero_std & (c_bit == 0)] >= threshold, 1.0, 0.0
+        )
+
+    # Gaussian approximation case
+    nz = ~zero_std
+    if np.any(nz):
+        pe[nz & (c_bit == 1)] = 0.5 * erfc(
+            (mu[nz & (c_bit == 1)] - threshold)
+            / (std[nz & (c_bit == 1)] * np.sqrt(2))
+        )
+        pe[nz & (c_bit == 0)] = 0.5 * erfc(
+            (threshold - mu[nz & (c_bit == 0)])
+            / (std[nz & (c_bit == 0)] * np.sqrt(2))
+        )
+
+    return float(np.mean(pe))
+
+
+def add_fixed_width_columns(row, values, max_len, prefix):
+    """Adds fixed-width columns prefix_1 ... prefix_max_len to a row dictionary."""
+    for i in range(max_len):
+        row[f"{prefix}_{i+1}"] = float(values[i]) if i < len(values) else np.nan
+    return row
+
+
+def generate_random_monotone_sequence(rng, length, first_low, first_high, decay_low, decay_high):
+    """Generates a positive monotone-decreasing random sequence."""
+    x = np.empty(length, dtype=float)
+    x[0] = rng.uniform(first_low, first_high)
+    for i in range(1, length):
+        x[i] = x[i - 1] * rng.uniform(decay_low, decay_high)
+    return x
+
+
+# --- Generation Logic ---
+
+def generate_physics_sample(rng):
+    """Generates data from physical molecular communication parameters."""
+    radius = rng.uniform(3.0, 7.0)
+    distance = rng.uniform(3.0, 15.0)
+    diff = rng.uniform(50.0, 120.0)
+    Ts = rng.uniform(0.5, 3.0)
+    N = int(10 ** rng.uniform(3.0, 6.0))
+
+    f_inf = radius / (radius + distance)
+    target = ARRIVAL_COVERAGE * f_inf
+
+    cumsum, k = 0.0, 0
+    while k < PHYSICS_MAX_MEM_LEN:
+        pk = Fhit_function(radius, distance, diff, (k + 1) * Ts) - Fhit_function(
+            radius, distance, diff, k * Ts
+        )
+        cumsum += pk
+        k += 1
+        if cumsum >= target:
+            break
+
+    P_ext = calculate_hitting_probabilities(k + 1, radius, distance, diff, Ts)
+    P_main = P_ext[:k]
+    P_extra = float(P_ext[k])
+
+    # Physics-based mean and variance
+    P_scaled = P_main * N
+    variances = N * P_main * (1.0 - P_main)
+    P_extra_var = N * P_extra * (1.0 - P_extra)
+
+    lambda_max = max(1.0, 1.5 * P_scaled[0])
+    threshold = float(rng.uniform(1.0, lambda_max))
+
+    ber = calculate_ber_vectorized(k, threshold, P_scaled, variances)
+
+    row = {
+        "radius": radius,
+        "distance": distance,
+        "diffusion": diff,
+        "Ts": Ts,
+        "N": N,
+        "mem_len": k,
+        "threshold": threshold,
+        "BER": ber,
+        "P_mem_len_extra": P_extra,
+        "P_mem_len_extra_var": P_extra_var,
+    }
+
+    row = add_fixed_width_columns(row, P_main, PHYSICS_MAX_MEM_LEN, prefix="tap")
+    row = add_fixed_width_columns(row, variances, PHYSICS_MAX_MEM_LEN, prefix="var")
+    return row
+
+
+def generate_random_sample_with_random_variances(rng):
+    """
+    Generates synthetic data using random monotone-decreasing tap sequences
+    and independently random monotone-decreasing variance sequences.
+    """
+    mem_len = int(rng.integers(3, RANDOM_MAX_MEM_LEN + 1))
+    N = int(10 ** rng.uniform(3.0, 6.0))
+
+    # Random monotone-decreasing probability taps
+    P = generate_random_monotone_sequence(
+        rng=rng,
+        length=mem_len,
+        first_low=0.05,
+        first_high=0.95,
+        decay_low=0.35,
+        decay_high=0.98,
+    )
+    P = np.clip(P, 1e-6, 1 - 1e-6)
+
+    P_scaled = P * N
+
+    # Independently random monotone-decreasing variance taps
+    var0 = rng.uniform(0.01 * max(P_scaled[0], 1.0), 1.2 * max(P_scaled[0], 1.0))
+    variances = generate_random_monotone_sequence(
+        rng=rng,
+        length=mem_len,
+        first_low=var0,
+        first_high=var0,
+        decay_low=0.35,
+        decay_high=0.98,
+    )
+    variances = np.maximum(variances, 1e-12)
+
+    # Random threshold based on the first slot's expected arrivals
+    threshold = float(rng.uniform(1.0, max(2.0, 1.5 * P_scaled[0])))
+
+    ber = calculate_ber_vectorized(mem_len, threshold, P_scaled, variances)
+
+    row = {
+        "mem_len": mem_len,
+        "threshold": threshold,
+        "BER": ber,
+        "p0": P[0],
+        "N": N,
+    }
+
+    row = add_fixed_width_columns(row, P, RANDOM_MAX_MEM_LEN, prefix="tap")
+    row = add_fixed_width_columns(row, variances, RANDOM_MAX_MEM_LEN, prefix="var")
+    return row
+
+
+# --- Main Runtime ---
+
+def save_data(data_list, filename):
+    """Appends data to the CSV and includes a header only if the file is new."""
+    df = pd.DataFrame(data_list)
+    file_exists = os.path.isfile(filename)
+    df.to_csv(filename, mode="a", index=False, header=not file_exists)
+
+
+if __name__ == "__main__":
+    os.makedirs(BASE_DIR, exist_ok=True)
+
+    rng = np.random.default_rng()
+    p_buffer, r_buffer = [], []
+    total_generated = 0
+
+    print(f"Generation Active. Logging every {LOG_INTERVAL} rows.")
+    print(f"Files: {PHYSICS_CSV}, {RANDOM_CSV}")
+
+    try:
+        while True:
+            p_buffer.append(generate_physics_sample(rng))
+            r_buffer.append(generate_random_sample_with_random_variances(rng))
+            total_generated += 1
+
+            # To prevent data loss, append to file frequently
+            if len(p_buffer) >= 100:
+                save_data(p_buffer, PHYSICS_CSV)
+                save_data(r_buffer, RANDOM_CSV)
+                p_buffer, r_buffer = [], []
+
+            if total_generated % LOG_INTERVAL == 0:
+                print(f"[{time.strftime('%H:%M:%S')}] Total rows generated and saved: {total_generated}")
+
+    except KeyboardInterrupt:
+        print("\nStopping... flushing final buffer.")
+        if p_buffer:
+            save_data(p_buffer, PHYSICS_CSV)
+        if r_buffer:
+            save_data(r_buffer, RANDOM_CSV)
+        print("Data saved successfully.")

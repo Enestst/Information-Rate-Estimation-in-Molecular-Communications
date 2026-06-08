@@ -134,7 +134,7 @@ def train_engine(csv_file):
     return model
 
 if __name__ == "__main__":
-    DATA_PATH = "data_physics_total.csv" 
+    DATA_PATH = "data_physics_with_variance_total.csv" 
     if os.path.exists(DATA_PATH):
         print(f"Loading {DATA_PATH} and beginning training...")
         trained_model = train_engine(DATA_PATH)
